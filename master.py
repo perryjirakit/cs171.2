@@ -21,7 +21,7 @@ class Master:
             while True:
                 try:
                     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                    sock.connect(('localhost', self.client_ports[client_id]))
+                    sock.connect(('127.0.0.1', self.client_ports[client_id]))
                     self.client_sockets[client_id] = sock
                     print(f"Master connected to Client {client_id}")
                     break

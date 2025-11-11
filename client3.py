@@ -28,7 +28,7 @@ class Client:
         """Start listening for incoming connections"""
         self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        self.server_socket.bind(('localhost', self.port))
+        self.server_socket.bind(('127.0.0.1', self.port))
         self.server_socket.listen(5)
         print(f"Client {self.client_id} listening on port {self.port}")
         
@@ -69,7 +69,7 @@ class Client:
             while True:
                 try:
                     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                    sock.connect(('localhost', other_port))
+                    sock.connect(('127.0.0.1', other_port))
                     self.client_sockets[other_id] = sock
                     print(f"Client {self.client_id} connected to Client {other_id}")
                     break
