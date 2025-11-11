@@ -1,0 +1,3 @@
+insert 3 A 3
+wait 13
+lookup 3 2
