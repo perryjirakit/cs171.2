@@ -1,313 +1,299 @@
-#!/usr/bin/env python3
-# Identical implementation to client1.py — kept standalone per submission rule
-import argparse
 import socket
 import threading
+import json
 import time
-from typing import List, Tuple, Set, Dict
+import argparse
+import sys
 
-CLIENT_PORTS = {'1': 8001, '2': 8002, '3': 8003}
-
-MY_CLIENT_ID: str = None
-MY_PORT: int = None
-
-client_sockets: Dict[str, socket.socket] = {}
-
-local_dictionary: Dict[str, str] = {}
-local_dictionary_lock = threading.Lock()
-
-lamport_clock = 0
-lamport_clock_lock = threading.Lock()
-
-client_state = "RELEASED"
-client_state_lock = threading.Lock()
-
-request_queue: List[Tuple[int, str]] = []
-request_queue_lock = threading.Lock()
-
-current_request_ts = -1
-current_request_ts_lock = threading.Lock()
-
-current_insert = None
-current_insert_lock = threading.Lock()
-
-replies_received: Set[str] = set()
-replies_received_lock = threading.Lock()
-
-success_received: Set[str] = set()
-success_received_lock = threading.Lock()
-
-my_turn_event = threading.Event()
-all_success_event = threading.Event()
-
-def send_line(sock: socket.socket, s: str):
-    sock.sendall((s + "\n").encode("utf-8"))
-
-def recv_line_file(f) -> str:
-    line = f.readline()
-    if not line:
-        return ""
-    return line.decode("utf-8").rstrip("\r\n")
-
-def lamport_on_send_request() -> int:
-    global lamport_clock
-    with lamport_clock_lock:
-        lamport_clock += 1
-        return lamport_clock
-
-def lamport_on_recv_request(incoming_ts: int) -> int:
-    global lamport_clock
-    with lamport_clock_lock:
-        lamport_clock = max(lamport_clock, incoming_ts) + 1
-        return lamport_clock
-
-def queue_push(ts: int, cid: str):
-    with request_queue_lock:
-        request_queue.append((ts, cid))
-        request_queue.sort(key=lambda x: (x[0], int(x[1])))
-
-def queue_head() -> Tuple[int, str] | None:
-    with request_queue_lock:
-        return request_queue[0] if request_queue else None
-
-def queue_remove(cid: str):
-    with request_queue_lock:
-        for i, (_, who) in enumerate(request_queue):
-            if who == cid:
-                request_queue.pop(i)
-                break
-
-def i_am_head() -> bool:
-    h = queue_head()
-    return bool(h and h[1] == MY_CLIENT_ID)
-
-def have_all_replies() -> bool:
-    with replies_received_lock:
-        return len(replies_received) == 2
-
-def have_all_success() -> bool:
-    with success_received_lock:
-        return len(success_received) == 2
-
-def reset_barriers():
-    with replies_received_lock:
-        replies_received.clear()
-    with success_received_lock:
-        success_received.clear()
-    my_turn_event.clear()
-    all_success_event.clear()
-
-def peers():
-    return [cid for cid in CLIENT_PORTS if cid != MY_CLIENT_ID]
-
-def broadcast_to_peers(msg: str):
-    print(f"[C{MY_CLIENT_ID}] Broadcast: {msg}")
-    for cid in peers():
-        s = client_sockets.get(cid)
-        if s is None:
-            continue
-        try:
-            send_line(s, msg)
-        except Exception as e:
-            print(f"[C{MY_CLIENT_ID}] Send to {cid} failed: {e}")
-
-def try_enter_cs():
-    with client_state_lock:
-        if client_state != "WANTED":
-            return
-    if i_am_head() and have_all_replies():
-        my_turn_event.set()
-
-def start_lamport_insert(perm: str, grade: str, master_conn: socket.socket):
-    with current_insert_lock:
-        global current_insert
-        current_insert = (perm, grade)
-    with client_state_lock:
-        global client_state
-        client_state = "WANTED"
-    reset_barriers()
-
-    ts = lamport_on_send_request()
-    with current_request_ts_lock:
-        global current_request_ts
-        current_request_ts = ts
-    queue_push(ts, MY_CLIENT_ID)
-
-    broadcast_to_peers(f"REQUEST {ts} {MY_CLIENT_ID}")
-
-    print(f"[C{MY_CLIENT_ID}] Waiting to enter CS...")
-    my_turn_event.wait()
-    with client_state_lock:
-        client_state = "HELD"
-    print(f"[C{MY_CLIENT_ID}] Entered CS")
-
-    with current_insert_lock:
-        p, g = current_insert
-    broadcast_to_peers(f"INSERT {p} {g} {MY_CLIENT_ID}")
-
-    with local_dictionary_lock:
-        local_dictionary[p] = g
-
-    all_success_event.wait()
-
-    queue_remove(MY_CLIENT_ID)
-    with client_state_lock:
-        client_state = "RELEASED"
-    broadcast_to_peers(f"RELEASE {MY_CLIENT_ID}")
-
-    try:
-        send_line(master_conn, "SUCCESS")
-    except Exception as e:
-        print(f"[C{MY_CLIENT_ID}] Failed to reply SUCCESS to master: {e}")
-
-def handle_peer_message(msg: str):
-    time.sleep(3)
-
-    parts = msg.split()
-    if not parts:
-        return
-    kind = parts[0]
-
-    if kind == "REQUEST":
-        ts = int(parts[1]); other = parts[2]
-        lamport_on_recv_request(ts)
-        queue_push(ts, other)
-        s = client_sockets.get(other)
-        if s:
-            send_line(s, f"REPLY {MY_CLIENT_ID}")
-        try_enter_cs()
-
-    elif kind == "REPLY":
-        other = parts[1]
-        with replies_received_lock:
-            replies_received.add(other)
-        try_enter_cs()
-
-    elif kind == "INSERT":
-        perm, grade, src = parts[1], parts[2], parts[3]
-        with local_dictionary_lock:
-            local_dictionary[perm] = grade
-        s = client_sockets.get(src)
-        if s:
-            send_line(s, f"SUCCESS {MY_CLIENT_ID}")
-
-    elif kind == "SUCCESS":
-        other = parts[1]
-        with success_received_lock:
-            success_received.add(other)
-            if have_all_success():
-                all_success_event.set()
-
-    elif kind == "RELEASE":
-        other = parts[1]
-        queue_remove(other)
-        try_enter_cs()
-
-def handle_connection(conn: socket.socket, addr):
-    print(f"[C{MY_CLIENT_ID}] Incoming from {addr}")
-    f = conn.makefile("rb", buffering=0)
-    try:
-        while True:
-            line = recv_line_file(f)
-            if not line:
-                break
-            parts = line.split()
-            if not parts:
-                continue
-            cmd = parts[0]
-
-            if cmd == "insert":
-                perm, grade = parts[1], parts[2]
-                start_lamport_insert(perm, grade, conn)
-
-            elif cmd == "lookup":
-                perm = parts[1]
-                with local_dictionary_lock:
-                    g = local_dictionary.get(perm)
-                if g is None:
-                    send_line(conn, "NOT FOUND")
-                else:
-                    send_line(conn, f"{perm}, {g}")
-
-            elif cmd == "dictionary":
-                with local_dictionary_lock:
-                    items = sorted(local_dictionary.items(),
-                                   key=lambda kv: (int(kv[0]) if kv[0].isdigit() else kv[0]))
-                    body = "{" + ", ".join([f"'{k}': '{v}'" for k, v in items]) + "}"
-                send_line(conn, body)
-
-            elif cmd in ("REQUEST", "REPLY", "INSERT", "SUCCESS", "RELEASE"):
-                handle_peer_message(line)
-            else:
-                pass
-    except Exception as e:
-        print(f"[C{MY_CLIENT_ID}] Handler error: {e}")
-    finally:
-        try: conn.close()
-        except: pass
-        print(f"[C{MY_CLIENT_ID}] Connection closed {addr}")
-
-def run_server(port: int):
-    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    srv.bind(("localhost", port))
-    srv.listen(8)
-    print(f"[C{MY_CLIENT_ID}] Listening on {port}")
-    try:
-        while True:
-            c, a = srv.accept()
-            t = threading.Thread(target=handle_connection, args=(c, a), daemon=True)
-            t.start()
-    except Exception as e:
-        print(f"[C{MY_CLIENT_ID}] Server error: {e}")
-    finally:
-        try: srv.close()
-        except: pass
-
-def connect_to_peers():
-    for cid in peers():
-        port = CLIENT_PORTS[cid]
+class Client:
+    def __init__(self, client_id, port, other_ports):
+        self.client_id = client_id
+        self.port = port
+        self.other_ports = other_ports
+        self.dictionary = {}
+        self.lamport_clock = 0
+        self.request_queue = []  # (timestamp, client_id, request_type)
+        self.replies_received = set()
+        self.success_received = set()
+        self.waiting_for_mutual_exclusion = False
+        self.pending_insert = None
+        self.lock = threading.Lock()
+        
+        # Socket connections
+        self.server_socket = None
+        self.client_sockets = {}
+        self.master_connection = None
+        
+    def start_server(self):
+        """Start listening for incoming connections"""
+        self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self.server_socket.bind(('localhost', self.port))
+        self.server_socket.listen(5)
+        print(f"Client {self.client_id} listening on port {self.port}")
+        
         while True:
             try:
-                s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                s.connect(("localhost", port))
-                client_sockets[cid] = s
-                print(f"[C{MY_CLIENT_ID}] Connected to peer {cid} ({port})")
+                conn, addr = self.server_socket.accept()
+                threading.Thread(target=self.handle_connection, args=(conn,), daemon=True).start()
+            except:
                 break
-            except ConnectionRefusedError:
-                print(f"[C{MY_CLIENT_ID}] Peer {cid} not ready; retrying...")
-                time.sleep(1)
-            except Exception as e:
-                print(f"[C{MY_CLIENT_ID}] Connect error to {cid}: {e}")
-                time.sleep(1)
-
-def main():
-    global MY_CLIENT_ID, MY_PORT
-
-    ap = argparse.ArgumentParser(description="CS171 PA2 Client")
-    ap.add_argument("-port", type=int, required=True)
-    ap.add_argument("-client", type=int, required=True, help="1, 2, or 3")
-    args = ap.parse_args()
-
-    MY_CLIENT_ID = str(args.client)
-    if MY_CLIENT_ID not in CLIENT_PORTS:
-        print(f"[Client] Invalid client id {MY_CLIENT_ID}")
-        return
-
-    MY_PORT = args.port
-
-    t = threading.Thread(target=run_server, args=(MY_PORT,), daemon=True)
-    t.start()
-    time.sleep(1.5)
-
-    connect_to_peers()
-
-    print(f"[C{MY_CLIENT_ID}] Ready for Master.")
-    try:
+                
+    def handle_connection(self, conn):
+        """Handle incoming messages"""
+        buffer = ""
         while True:
-            time.sleep(60)
-    except KeyboardInterrupt:
-        print(f"[C{MY_CLIENT_ID}] Shutting down...")
+            try:
+                data = conn.recv(4096).decode('utf-8')
+                if not data:
+                    break
+                    
+                buffer += data
+                while '\n' in buffer:
+                    line, buffer = buffer.split('\n', 1)
+                    if line.strip():
+                        # Simulate network delay (3 seconds) for client-to-client messages
+                        message = json.loads(line)
+                        if message.get('type') not in ['MASTER_INSERT', 'MASTER_LOOKUP', 'MASTER_DICTIONARY']:
+                            time.sleep(3)
+                        self.process_message(message, conn)
+            except Exception as e:
+                print(f"Client {self.client_id} error handling connection: {e}")
+                break
+        conn.close()
+        
+    def connect_to_clients(self):
+        """Connect to other clients"""
+        time.sleep(2)  # Give other clients time to start
+        for other_id, other_port in self.other_ports.items():
+            while True:
+                try:
+                    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                    sock.connect(('localhost', other_port))
+                    self.client_sockets[other_id] = sock
+                    print(f"Client {self.client_id} connected to Client {other_id}")
+                    break
+                except:
+                    time.sleep(1)
+                    
+    def send_message(self, recipient_id, message):
+        """Send message to another client"""
+        try:
+            if recipient_id == 'master':
+                if self.master_connection:
+                    msg = json.dumps(message) + '\n'
+                    self.master_connection.sendall(msg.encode('utf-8'))
+            else:
+                sock = self.client_sockets.get(recipient_id)
+                if sock:
+                    msg = json.dumps(message) + '\n'
+                    sock.sendall(msg.encode('utf-8'))
+        except Exception as e:
+            print(f"Client {self.client_id} error sending to {recipient_id}: {e}")
+            
+    def process_message(self, message, conn=None):
+        """Process incoming messages"""
+        msg_type = message.get('type')
+        
+        with self.lock:
+            if msg_type == 'MASTER_INSERT':
+                # Master wants us to insert
+                self.master_connection = conn
+                perm = message['perm']
+                grade = message['grade']
+                self.start_insert(perm, grade)
+                
+            elif msg_type == 'MASTER_LOOKUP':
+                # Master wants us to lookup
+                self.master_connection = conn
+                perm = message['perm']
+                result = self.dictionary.get(str(perm), 'NOT FOUND')
+                response = {
+                    'type': 'LOOKUP_RESULT',
+                    'perm': perm,
+                    'grade': result,
+                    'clock': self.lamport_clock
+                }
+                self.send_message('master', response)
+                
+            elif msg_type == 'MASTER_DICTIONARY':
+                # Master wants dictionary state
+                self.master_connection = conn
+                response = {
+                    'type': 'DICTIONARY_RESULT',
+                    'dictionary': self.dictionary,
+                    'clock': self.lamport_clock
+                }
+                self.send_message('master', response)
+                
+            elif msg_type == 'REQUEST':
+                # Another client wants mutual exclusion
+                self.lamport_clock = max(self.lamport_clock, message['clock']) + 1
+                print(f"Client {self.client_id} [Event - REQUEST] - [Clock - {message['clock']}] - [Received from Client {message['from']}]")
+                print(f"Client {self.client_id} Clock Value {self.lamport_clock - 1} -> {self.lamport_clock}")
+                
+                # Add to queue
+                self.request_queue.append((message['clock'], message['from']))
+                self.request_queue.sort()
+                
+                # Send reply
+                reply = {
+                    'type': 'REPLY',
+                    'from': self.client_id,
+                    'clock': self.lamport_clock
+                }
+                print(f"Client {self.client_id} [Event - REPLY] - [Clock - {self.lamport_clock}] - [Sent to Client {message['from']}]")
+                self.send_message(message['from'], reply)
+                
+            elif msg_type == 'REPLY':
+                # Received reply for our request
+                print(f"Client {self.client_id} [Event - REPLY] - [Clock - {message['clock']}] - [Received from Client {message['from']}]")
+                self.replies_received.add(message['from'])
+                
+                # Check if we can proceed
+                if len(self.replies_received) == 2 and self.check_queue_head():
+                    self.execute_insert()
+                    
+            elif msg_type == 'INSERT':
+                # Another client is broadcasting insert
+                print(f"Client {self.client_id} [Event - INSERT] - [Clock - {self.lamport_clock}] - [Received from Client {message['from']}]")
+                self.dictionary[str(message['perm'])] = message['grade']
+                
+                # Send success
+                success = {
+                    'type': 'SUCCESS',
+                    'from': self.client_id,
+                    'clock': self.lamport_clock
+                }
+                print(f"Client {self.client_id} [Event - SUCCESS] - [Clock - {self.lamport_clock}] - [Sent to Client {message['from']}]")
+                self.send_message(message['from'], success)
+                
+            elif msg_type == 'SUCCESS':
+                # Received success for our insert
+                print(f"Client {self.client_id} [Event - SUCCESS] - [Clock - {message['clock']}] - [Received from Client {message['from']}]")
+                self.success_received.add(message['from'])
+                
+                # Check if we got all success messages
+                if len(self.success_received) == 2:
+                    print(f"Client {self.client_id} Received all success messages: 2")
+                    self.finish_insert()
+                    
+            elif msg_type == 'RELEASE':
+                # Another client is releasing mutual exclusion
+                print(f"Client {self.client_id} [Event - RELEASE] - [Clock - {self.lamport_clock}] - [Received from Client {message['from']}]")
+                # Remove from queue
+                self.request_queue = [(ts, cid) for ts, cid in self.request_queue if cid != message['from']]
+                
+    def start_insert(self, perm, grade):
+        """Start insert operation"""
+        print(f"Client {self.client_id} [Event - Master - INSERT_REQUEST] - [Clock - {self.lamport_clock}] - [Received from Master]")
+        self.pending_insert = (perm, grade)
+        self.lamport_clock += 1
+        print(f"Client {self.client_id} Clock Value {self.lamport_clock - 1} -> {self.lamport_clock}")
+        
+        # Add our request to queue
+        self.request_queue.append((self.lamport_clock, self.client_id))
+        self.request_queue.sort()
+        
+        # Broadcast request
+        request = {
+            'type': 'REQUEST',
+            'from': self.client_id,
+            'clock': self.lamport_clock
+        }
+        print(f"Client {self.client_id} [Event - Broadcast - REQUEST] - [Clock - {self.lamport_clock}] - [Sent from Client {self.client_id}]")
+        for other_id in self.other_ports.keys():
+            self.send_message(other_id, request)
+            
+        self.replies_received = set()
+        self.success_received = set()
+        self.waiting_for_mutual_exclusion = True
+        
+    def check_queue_head(self):
+        """Check if we're at the head of the queue"""
+        if self.request_queue and self.request_queue[0][1] == self.client_id:
+            return True
+        return False
+        
+    def execute_insert(self):
+        """Execute the insert operation"""
+        if not self.pending_insert:
+            return
+            
+        perm, grade = self.pending_insert
+        
+        # Insert locally
+        self.dictionary[str(perm)] = grade
+        
+        # Broadcast insert to other clients
+        insert_msg = {
+            'type': 'INSERT',
+            'from': self.client_id,
+            'perm': perm,
+            'grade': grade,
+            'clock': self.lamport_clock
+        }
+        print(f"Client {self.client_id} [Event - Broadcast - INSERT] - [Clock - {self.lamport_clock}] - [Sent from Client {self.client_id}]")
+        for other_id in self.other_ports.keys():
+            self.send_message(other_id, insert_msg)
+            
+    def finish_insert(self):
+        """Finish insert and release mutual exclusion"""
+        # Remove ourselves from queue
+        self.request_queue = [(ts, cid) for ts, cid in self.request_queue if cid != self.client_id]
+        
+        # Broadcast release
+        release = {
+            'type': 'RELEASE',
+            'from': self.client_id,
+            'clock': self.lamport_clock
+        }
+        print(f"Client {self.client_id} [Event - Broadcast - RELEASE] - [Clock - {self.lamport_clock}] - [Sent from Client {self.client_id}]")
+        for other_id in self.other_ports.keys():
+            self.send_message(other_id, release)
+            
+        # Notify master
+        response = {
+            'type': 'INSERT_SUCCESS',
+            'perm': self.pending_insert[0],
+            'grade': self.pending_insert[1],
+            'clock': self.lamport_clock
+        }
+        print(f"Client {self.client_id} [Event - Master - INSERT_SUCCESS] - [Clock - {self.lamport_clock}] - [Sent to Master]")
+        self.send_message('master', response)
+        
+        self.pending_insert = None
+        self.waiting_for_mutual_exclusion = False
+        self.replies_received = set()
+        self.success_received = set()
+        
+    def run(self):
+        """Run the client"""
+        # Start server thread
+        threading.Thread(target=self.start_server, daemon=True).start()
+        
+        # Connect to other clients
+        self.connect_to_clients()
+        
+        # Keep running
+        try:
+            while True:
+                time.sleep(1)
+        except KeyboardInterrupt:
+            print(f"Client {self.client_id} shutting down")
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser()
+    parser.add_argument('-port', type=int, required=True)
+    parser.add_argument('-client', type=int, required=True)
+    args = parser.parse_args()
+    
+    # Define other client ports
+    other_ports = {}
+    base_port = args.port - args.client + 1
+    for i in range(1, 4):
+        if i != args.client:
+            other_ports[i] = base_port + i - 1
+    
+    client = Client(args.client, args.port, other_ports)
+    client.run()

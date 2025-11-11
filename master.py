@@ -1,119 +1,203 @@
-#!/usr/bin/env python3
-import argparse
 import socket
+import threading
+import json
 import time
+import argparse
+import sys
 
-CLIENT_PORTS = {
-    '1': 8001,
-    '2': 8002,
-    '3': 8003,
-}
-
-def send_line(sock, s: str):
-    sock.sendall((s + "\n").encode("utf-8"))
-
-def recv_line(sock) -> str:
-    f = sock.makefile("rb", buffering=0)
-    line = f.readline()
-    if not line:
-        return ""
-    return line.decode("utf-8").rstrip("\r\n")
-
-def main():
-    parser = argparse.ArgumentParser(description="CS171 PA2 Master")
-    parser.add_argument("-port", type=int, required=True, help="(Unused; required by template)")
-    parser.add_argument("-inputfile", type=str, required=True)
-    parser.add_argument("-outputfile", type=str, required=True)
-    args = parser.parse_args()
-
-    # Fresh output file
-    with open(args.outputfile, "w"):
-        pass
-
-    # Connect to all three clients
-    client_socks = {}
-    try:
-        for cid, port in CLIENT_PORTS.items():
-            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            s.connect(("localhost", port))
-            client_socks[cid] = s
-            print(f"[Master] Connected to client {cid} on {port}")
-    except Exception as e:
-        print(f"[Master] Failed to connect to clients: {e}")
-        for s in client_socks.values():
-            try: s.close()
-            except: pass
-        return
-
-    try:
-        with open(args.inputfile, "r") as fin:
-            for raw in fin:
-                line = raw.strip()
-                if not line or line.startswith("#"):
-                    continue
-
-                parts = line.split()
-                cmd = parts[0]
-                if cmd == "wait":
-                    # wait <x>
-                    try:
-                        wt = int(parts[1])
-                    except:
-                        wt = 1
-                    print(f"[Master] wait {wt}s")
-                    time.sleep(wt)
-                    continue
-
-                log_entry = None
-
-                if cmd == "insert":
-                    # insert <perm> <grade> <client id>
-                    perm, grade, cid = parts[1], parts[2], parts[3]
-                    s = client_socks[cid]
-                    send_line(s, f"insert {perm} {grade}")
-                    reply = recv_line(s)
-                    if reply == "SUCCESS":
-                        log_entry = f"SUCCESS <insert {perm} {grade} {cid}>"
-                    else:
-                        log_entry = f"FAILURE <insert {perm} {grade} {cid}>"
-
-                elif cmd == "lookup":
-                    # lookup <perm> <client id>
-                    perm, cid = parts[1], parts[2]
-                    s = client_socks[cid]
-                    send_line(s, f"lookup {perm}")
-                    reply = recv_line(s)
-                    if reply == "NOT FOUND":
-                        log_entry = "LOOKUP <NOT FOUND>"
-                    else:
-                        # reply format: "<perm>, <grade>"
-                        log_entry = f"LOOKUP <{reply}>"
-
-                elif cmd == "dictionary":
-                    # dictionary <client id>
-                    cid = parts[1]
-                    s = client_socks[cid]
-                    send_line(s, "dictionary")
-                    reply = recv_line(s)
-                    log_entry = reply
-
-                else:
-                    print(f"[Master] Unknown command: {line}")
-                    continue
-
-                print(f"[Master] Logging: {log_entry}")
-                with open(args.outputfile, "a") as fout:
-                    fout.write(log_entry + "\n")
-
-    except FileNotFoundError:
-        print(f"[Master] Input file not found: {args.inputfile}")
-    except Exception as e:
-        print(f"[Master] Error: {e}")
-    finally:
-        for s in client_socks.values():
-            try: s.close()
-            except: pass
-        print("[Master] Done.")
+class Master:
+    def __init__(self, port, input_file, output_file, client_ports):
+        self.port = port
+        self.input_file = input_file
+        self.output_file = output_file
+        self.client_ports = client_ports
+        self.client_sockets = {}
+        self.output_lines = []
+        
+    def connect_to_clients(self):
+        """Connect to all three clients"""
+        time.sleep(3)  # Give clients time to start
+        for client_id in [1, 2, 3]:
+            while True:
+                try:
+                    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                    sock.connect(('localhost', self.client_ports[client_id]))
+                    self.client_sockets[client_id] = sock
+                    print(f"Master connected to Client {client_id}")
+                    break
+                except:
+                    time.sleep(1)
+                    
+    def send_message(self, client_id, message):
+        """Send message to a client"""
+        try:
+            sock = self.client_sockets.get(client_id)
+            if sock:
+                msg = json.dumps(message) + '\n'
+                sock.sendall(msg.encode('utf-8'))
+        except Exception as e:
+            print(f"Master error sending to Client {client_id}: {e}")
+            
+    def receive_message(self, client_id):
+        """Receive message from a client"""
+        try:
+            sock = self.client_sockets.get(client_id)
+            if sock:
+                buffer = ""
+                while True:
+                    data = sock.recv(4096).decode('utf-8')
+                    if not data:
+                        return None
+                    buffer += data
+                    if '\n' in buffer:
+                        line, buffer = buffer.split('\n', 1)
+                        return json.loads(line)
+        except Exception as e:
+            print(f"Master error receiving from Client {client_id}: {e}")
+            return None
+            
+    def process_commands(self):
+        """Process commands from input file"""
+        try:
+            with open(self.input_file, 'r') as f:
+                commands = f.readlines()
+        except FileNotFoundError:
+            print(f"Error: Input file '{self.input_file}' not found")
+            return
+            
+        for command in commands:
+            command = command.strip()
+            if not command:
+                continue
+                
+            print(f"Master processing: {command}")
+            parts = command.split()
+            
+            if parts[0] == 'insert':
+                perm = parts[1]
+                grade = parts[2]
+                client_id = int(parts[3])
+                self.handle_insert(perm, grade, client_id)
+                
+            elif parts[0] == 'lookup':
+                perm = parts[1]
+                client_id = int(parts[2])
+                self.handle_lookup(perm, client_id)
+                
+            elif parts[0] == 'dictionary':
+                client_id = int(parts[1])
+                self.handle_dictionary(client_id)
+                
+            elif parts[0] == 'wait':
+                wait_time = int(parts[1])
+                print(f"Master [Event - WAIT] [TIME - {wait_time}]")
+                time.sleep(wait_time)
+                
+    def handle_insert(self, perm, grade, client_id):
+        """Handle insert command"""
+        print(f"Master [Event - INSERT] [PERM - {perm}] [GRADE - {grade}] - [Sent to Client {client_id}]")
+        
+        message = {
+            'type': 'MASTER_INSERT',
+            'perm': perm,
+            'grade': grade
+        }
+        self.send_message(client_id, message)
+        
+        # Wait for response
+        response = self.receive_message(client_id)
+        if response and response['type'] == 'INSERT_SUCCESS':
+            print(f"Master [Event - INSERT_SUCCESS] - [Clock - {response['clock']}] - [Received from Client {client_id}]")
+            output_line = f"SUCCESS <insert {perm} {grade} {client_id}>"
+            self.output_lines.append(output_line)
+            print(f"OUTPUT: {output_line}")
+            
+    def handle_lookup(self, perm, client_id):
+        """Handle lookup command"""
+        print(f"Master [Event - LOOKUP] [PERM - {perm}] - [Sent to Client {client_id}]")
+        
+        message = {
+            'type': 'MASTER_LOOKUP',
+            'perm': perm
+        }
+        self.send_message(client_id, message)
+        
+        # Wait for response
+        response = self.receive_message(client_id)
+        if response and response['type'] == 'LOOKUP_RESULT':
+            print(f"Master [Event - LOOKUP_SUCCESS] - [Clock - {response['clock']}] - [Received from Client {client_id}]")
+            grade = response['grade']
+            if grade == 'NOT FOUND':
+                output_line = f"LOOKUP <{perm}, NOT FOUND>"
+            else:
+                output_line = f"LOOKUP <{perm}, {grade}>"
+            self.output_lines.append(output_line)
+            print(f"OUTPUT: {output_line}")
+            
+    def handle_dictionary(self, client_id):
+        """Handle dictionary command"""
+        print(f"Master [Event - DICTIONARY] - [Sent to Client {client_id}]")
+        
+        message = {
+            'type': 'MASTER_DICTIONARY'
+        }
+        self.send_message(client_id, message)
+        
+        # Wait for response
+        response = self.receive_message(client_id)
+        if response and response['type'] == 'DICTIONARY_RESULT':
+            print(f"Master [Event - DICTIONARY_SUCCESS] - [Clock - {response['clock']}] - [Received from Client {client_id}]")
+            dictionary = response['dictionary']
+            # Format as dictionary
+            output_line = str(dictionary).replace("'", "'")
+            self.output_lines.append(output_line)
+            print(f"OUTPUT: {output_line}")
+            
+    def write_output(self):
+        """Write output to file"""
+        try:
+            with open(self.output_file, 'w') as f:
+                for line in self.output_lines:
+                    f.write(line + '\n')
+            print(f"Output written to {self.output_file}")
+        except Exception as e:
+            print(f"Error writing output file: {e}")
+            
+    def run(self):
+        """Run the master process"""
+        print("Master starting...")
+        
+        # Connect to clients
+        self.connect_to_clients()
+        
+        # Process commands
+        self.process_commands()
+        
+        # Write output
+        self.write_output()
+        
+        print("Master finished processing commands")
+        
+        # Give some time before closing
+        time.sleep(2)
+        
+        # Close connections
+        for sock in self.client_sockets.values():
+            sock.close()
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser()
+    parser.add_argument('-port', type=int, required=True)
+    parser.add_argument('-inputfile', type=str, required=True)
+    parser.add_argument('-outputfile', type=str, required=True)
+    args = parser.parse_args()
+
+    base_port = args.port - 3
+    client_ports = {
+        1: base_port,
+        2: base_port + 1,
+        3: base_port + 2
+    }
+    
+    master = Master(args.port, args.inputfile, args.outputfile, client_ports)
+    master.run()
