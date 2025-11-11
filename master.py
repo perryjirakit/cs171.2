@@ -73,22 +73,22 @@ class Master:
             print(f"Master processing: {command}")
             parts = command.split()
             
-            if parts[0] == 'insert':
+            if parts[0].lower() == 'insert':
                 perm = parts[1]
                 grade = parts[2]
                 client_id = int(parts[3])
                 self.handle_insert(perm, grade, client_id)
                 
-            elif parts[0] == 'lookup':
+            elif parts[0].lower() == 'lookup':
                 perm = parts[1]
                 client_id = int(parts[2])
                 self.handle_lookup(perm, client_id)
                 
-            elif parts[0] == 'dictionary':
+            elif parts[0].lower() == 'dictionary':
                 client_id = int(parts[1])
                 self.handle_dictionary(client_id)
                 
-            elif parts[0] == 'wait':
+            elif parts[0].lower() == 'wait':
                 wait_time = int(parts[1])
                 print(f"Master [Event - WAIT] [TIME - {wait_time}]")
                 time.sleep(wait_time)
