@@ -1,4 +1,0 @@
-SUCCESS <insert 3 A 3>
-SUCCESS <insert 3 B 2>
-LOOKUP <3, B>
-LOOKUP <3, B>
