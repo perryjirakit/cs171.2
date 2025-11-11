@@ -43,6 +43,7 @@ class Master:
         try:
             sock = self.client_sockets.get(client_id)
             if sock:
+                sock.settimeout(30) 
                 buffer = ""
                 while True:
                     data = sock.recv(4096).decode('utf-8')
@@ -111,7 +112,8 @@ class Master:
             output_line = f"SUCCESS <insert {perm} {grade} {client_id}>"
             self.output_lines.append(output_line)
             print(f"OUTPUT: {output_line}")
-            
+            time.sleep(3)
+
     def handle_lookup(self, perm, client_id):
         """Handle lookup command"""
         print(f"Master [Event - LOOKUP] [PERM - {perm}] - [Sent to Client {client_id}]")

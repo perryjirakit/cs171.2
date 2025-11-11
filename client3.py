@@ -114,7 +114,8 @@ class Client:
                     'grade': result,
                     'clock': self.lamport_clock
                 }
-                self.send_message('master', response)
+                msg = json.dumps(response) + '\n'
+                conn.sendall(msg.encode('utf-8'))
                 
             elif msg_type == 'MASTER_DICTIONARY':
                 # Master wants dictionary state
@@ -251,7 +252,9 @@ class Client:
         print(f"Client {self.client_id} [Event - Broadcast - RELEASE] - [Clock - {self.lamport_clock}] - [Sent from Client {self.client_id}]")
         for other_id in self.other_ports.keys():
             self.send_message(other_id, release)
-            
+        
+        time.sleep(6)
+
         # Notify master
         response = {
             'type': 'INSERT_SUCCESS',

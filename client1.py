@@ -114,7 +114,8 @@ class Client:
                     'grade': result,
                     'clock': self.lamport_clock
                 }
-                self.send_message('master', response)
+                msg = json.dumps(response) + '\n'
+                conn.sendall(msg.encode('utf-8'))
                 
             elif msg_type == 'MASTER_DICTIONARY':
                 # Master wants dictionary state
@@ -252,6 +253,8 @@ class Client:
         for other_id in self.other_ports.keys():
             self.send_message(other_id, release)
             
+        time.sleep(6)
+
         # Notify master
         response = {
             'type': 'INSERT_SUCCESS',
