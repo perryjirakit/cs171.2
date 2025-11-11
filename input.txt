@@ -1,7 +1,0 @@
-insert 3 A 3
-wait 4
-insert 3 B 2
-wait 20
-lookup 3 2
-wait 1
-lookup 3 1
